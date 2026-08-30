@@ -9,6 +9,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+     - name: Download KICS results
+  uses: actions/download-artifact@v4
+  with:
+    name: kics-results
+    path: results/kics
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,3 +69,5 @@ jobs:
           name: kics-pdf-report
           path: kics-results/kics-report.pdf
           retention-days: 30
+          
+          

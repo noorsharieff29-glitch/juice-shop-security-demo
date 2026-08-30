@@ -28,3 +28,9 @@ jobs:
           target: 'https://preview.owasp-juice.shop'
           rules_file_name: '.zap/rules.tsv'
           cmd_options: '-a -j'
+
+      - name: Upload ZAP results
+  uses: actions/upload-artifact@v4
+  with:
+    name: zap-results
+    path: zap.sarif
