@@ -1,61 +1,519 @@
-name: Consolidated Security Summary
+
+name: Security Scans and Consolidated Report
 
 on:
+  push:
+    branches:
+      - master
+      - security-demo
+
+  pull_request:
+    branches:
+      - master
+
   workflow_dispatch:
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 jobs:
-  security-summary:
+
+  # ============================================================
+  # KICS
+  # ============================================================
+
+  kics:
+    name: KICS IaC Scan
     runs-on: ubuntu-latest
 
     steps:
 
-      # ==================================================
-      # 1. Checkout repository
-      # ==================================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create KICS results directory
+        run: |
+          mkdir -p kics-results
+
+      - name: Run KICS
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/path" \
+            checkmarx/kics:latest \
+            scan \
+            -p /path \
+            -o /path/kics-results \
+            --report-formats "json,sarif,pdf" \
+            --output-name kics-report
+
+      - name: Show KICS results
+        if: always()
+        run: |
+          echo "=============================="
+          echo "KICS RESULTS"
+          echo "=============================="
+
+          find kics-results -type f -print || true
+
+      - name: Verify KICS SARIF
+        if: always()
+        run: |
+          SARIF_FILE=$(find kics-results -type f -name "*.sarif" | head -1)
+
+          if [ -n "$SARIF_FILE" ]; then
+            echo "KICS SARIF found:"
+            echo "$SARIF_FILE"
+          else
+            echo "KICS SARIF not found"
+          fi
+
+      - name: Verify KICS PDF
+        if: always()
+        run: |
+          PDF_FILE=$(find kics-results -type f -name "*.pdf" | head -1)
+
+          if [ -n "$PDF_FILE" ]; then
+            echo "KICS PDF found:"
+            echo "$PDF_FILE"
+          else
+            echo "KICS PDF not found"
+          fi
+
+      - name: Upload KICS results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kics-results
+          path: kics-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  # ============================================================
+  # 2MS
+  # ============================================================
+
+  two-ms:
+    name: Secret Scan (2MS)
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create 2MS artifacts directory
+        run: |
+          mkdir -p artifacts
+
+      - name: Run 2MS - Text Report
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "$PWD":/repo \
+            checkmarx/2ms \
+            git /repo \
+            --stdout-format yaml \
+            --ignore-on-exit results \
+            > artifacts/2ms-report.txt
+
+      - name: Run 2MS - SARIF Report
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "$PWD":/repo \
+            checkmarx/2ms \
+            git /repo \
+            --stdout-format sarif \
+            --ignore-on-exit results \
+            > artifacts/2ms.sarif
+
+      - name: Show 2MS results
+        if: always()
+        run: |
+          echo "=============================="
+          echo "2MS RESULTS"
+          echo "=============================="
+
+          ls -lah artifacts/
+
+      - name: Upload 2MS results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2ms-results
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  # ============================================================
+  # VORPAL
+  # ============================================================
+
+  vorpal:
+    name: Vorpal Code Scan
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get JavaScript files
+        id: js-files
+        run: |
+
+          FILES=$(find . \
+            -type f \
+            \( -name "*.js" -o -name "*.jsx" \) \
+            ! -path "./.git/*" \
+            ! -path "./node_modules/*" \
+            | paste -sd "," -)
+
+          echo "JavaScript files:"
+          echo "$FILES"
+
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Run Vorpal
+        if: steps.js-files.outputs.files != ''
+        uses: checkmarx/vorpal-reviewdog-github-action@v1.0.0
+        with:
+          source_path: "${{ steps.js-files.outputs.files }}"
+          filter_mode: nofilter
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-check
+          level: info
+          fail_on_error: false
+
+      - name: Create Vorpal reports directory
+        if: always()
+        run: |
+          mkdir -p reports
+
+      - name: Create Vorpal text report
+        if: always()
+        run: |
+
+          echo "==================================================" > reports/vorpal-security-report.txt
+          echo "             VORPAL SECURITY REPORT" >> reports/vorpal-security-report.txt
+          echo "==================================================" >> reports/vorpal-security-report.txt
+          echo "" >> reports/vorpal-security-report.txt
+
+          echo "Repository : ${{ github.repository }}" >> reports/vorpal-security-report.txt
+          echo "Branch     : ${{ github.ref_name }}" >> reports/vorpal-security-report.txt
+          echo "Commit     : ${{ github.sha }}" >> reports/vorpal-security-report.txt
+          echo "" >> reports/vorpal-security-report.txt
+
+          if [ -f all_results.errorformat ]; then
+
+            cat all_results.errorformat >> reports/vorpal-security-report.txt
+
+          else
+
+            echo "No Vorpal findings were generated." \
+              >> reports/vorpal-security-report.txt
+
+          fi
+
+      - name: Create Vorpal SARIF
+        if: always()
+        shell: bash
+        run: |
+
+          python3 <<'PY'
+
+          import json
+          import os
+          import re
+
+          input_file = "all_results.errorformat"
+          output_file = "reports/vorpal.sarif"
+
+          results = []
+
+          if os.path.exists(input_file):
+
+              with open(input_file, "r", errors="replace") as f:
+                  lines = f.readlines()
+
+              for line in lines:
+
+                  line = line.strip()
+
+                  if not line:
+                      continue
+
+                  match = re.match(
+                      r"^(.*?):(\d+):(\d+):\s*(.*)$",
+                      line
+                  )
+
+                  if match:
+
+                      file_path = match.group(1)
+                      line_number = int(match.group(2))
+                      column_number = int(match.group(3))
+                      message = match.group(4)
+
+                      results.append({
+                          "ruleId": "vorpal-finding",
+                          "level": "warning",
+                          "message": {
+                              "text": message
+                          },
+                          "locations": [
+                              {
+                                  "physicalLocation": {
+                                      "artifactLocation": {
+                                          "uri": file_path
+                                      },
+                                      "region": {
+                                          "startLine": line_number,
+                                          "startColumn": column_number
+                                      }
+                                  }
+                              }
+                          ]
+                      })
+
+          sarif = {
+              "$schema":
+                  "https://json.schemastore.org/sarif-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [
+                  {
+                      "tool": {
+                          "driver": {
+                              "name": "Checkmarx Vorpal"
+                          }
+                      },
+                      "results": results
+                  }
+              ]
+          }
+
+          with open(output_file, "w") as f:
+              json.dump(sarif, f, indent=2)
+
+          print(
+              f"Created {output_file} "
+              f"with {len(results)} findings"
+          )
+
+          PY
+
+      - name: Upload Vorpal results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vorpal-results
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  # ============================================================
+  # ZAP
+  # ============================================================
+
+  zap:
+    name: ZAP Baseline Scan
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.15.0
+        continue-on-error: true
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          docker_name: ghcr.io/zaproxy/zaproxy:stable
+          target: https://preview.owasp-juice.shop
+          rules_file_name: .zap/rules.tsv
+          cmd_options: "-a -j"
+
+      - name: Show ZAP reports
+        if: always()
+        run: |
+
+          echo "=============================="
+          echo "ZAP RESULTS"
+          echo "=============================="
+
+          ls -lah
+
+          echo ""
+          echo "ZAP JSON:"
+          ls -lh report_json.json 2>/dev/null || true
+
+          echo ""
+          echo "ZAP HTML:"
+          ls -lh report_html.html 2>/dev/null || true
+
+          echo ""
+          echo "ZAP Markdown:"
+          ls -lh report_md.md 2>/dev/null || true
+
+      # --------------------------------------------------------
+      # Convert ZAP JSON to SARIF
+      # --------------------------------------------------------
+
+      - name: Convert ZAP JSON to SARIF
+        if: always()
+        run: |
+
+          python3 <<'PY'
+
+          import json
+          import os
+
+          input_file = "report_json.json"
+          output_file = "zap.sarif"
+
+          results = []
+
+          if not os.path.exists(input_file):
+
+              print("ZAP JSON report not found.")
+              print("Creating empty SARIF.")
+
+          else:
+
+              with open(input_file, "r", errors="replace") as f:
+                  data = json.load(f)
+
+              sites = data.get("site", [])
+
+              for site in sites:
+
+                  site_name = site.get("@name", "")
+
+                  alerts = site.get("alerts", [])
+
+                  for alert in alerts:
+
+                      alert_name = alert.get("name", "ZAP Finding")
+                      risk = alert.get("riskdesc", "Informational")
+                      desc = alert.get("desc", "")
+
+                      instances = alert.get("instances", [])
+
+                      if not instances:
+                          instances = [{}]
+
+                      for instance in instances:
+
+                          uri = instance.get("uri", site_name)
+
+                          results.append({
+                              "ruleId": str(
+                                  alert.get(
+                                      "pluginid",
+                                      alert_name
+                                  )
+                              ),
+
+                              "level": (
+                                  "error"
+                                  if "high" in risk.lower()
+                                  else
+                                  "warning"
+                              ),
+
+                              "message": {
+                                  "text":
+                                      f"{alert_name}: {desc}"
+                              },
+
+                              "locations": [
+                                  {
+                                      "physicalLocation": {
+                                          "artifactLocation": {
+                                              "uri": uri
+                                          }
+                                      }
+                                  }
+                              ]
+                          })
+
+          sarif = {
+
+              "$schema":
+                  "https://json.schemastore.org/sarif-2.1.0.json",
+
+              "version": "2.1.0",
+
+              "runs": [
+                  {
+                      "tool": {
+                          "driver": {
+                              "name": "OWASP ZAP"
+                          }
+                      },
+
+                      "results": results
+                  }
+              ]
+          }
+
+          with open(output_file, "w") as f:
+              json.dump(sarif, f, indent=2)
+
+          print(
+              f"Created {output_file} "
+              f"with {len(results)} findings"
+          )
+
+          PY
+
+      - name: Upload ZAP results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-results
+          path: |
+            zap.sarif
+            report_json.json
+            report_html.html
+            report_md.md
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  # ============================================================
+  # CONSOLIDATION
+  # ============================================================
+
+  security-summary:
+    name: Consolidated Security Report
+
+    needs:
+      - kics
+      - two-ms
+      - vorpal
+      - zap
+
+    if: always()
+
+    runs-on: ubuntu-latest
+
+    steps:
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # ==================================================
-      # 2. Create results directories
-      # ==================================================
-
-      - name: Create results directories
-        run: |
-          mkdir -p results/vorpal
-          mkdir -p results/2ms
-          mkdir -p results/kics
-          mkdir -p results/zap
-
-
-      # ==================================================
-      # 3. Download Vorpal
-      # ==================================================
-
-      - name: Download Vorpal results
-        uses: actions/download-artifact@v4
-        with:
-          name: vorpal-results
-          path: results/vorpal
-        continue-on-error: true
-
-
-      # ==================================================
-      # 4. Download 2MS
-      # ==================================================
-
-      - name: Download 2MS results
-        uses: actions/download-artifact@v4
-        with:
-          name: 2ms-results
-          path: results/2ms
-        continue-on-error: true
-
-
-      # ==================================================
-      # 5. Download KICS
-      # ==================================================
+      # ========================================================
+      # Download artifacts FROM THIS WORKFLOW RUN
+      # ========================================================
 
       - name: Download KICS results
         uses: actions/download-artifact@v4
@@ -64,10 +522,19 @@ jobs:
           path: results/kics
         continue-on-error: true
 
+      - name: Download 2MS results
+        uses: actions/download-artifact@v4
+        with:
+          name: 2ms-results
+          path: results/2ms
+        continue-on-error: true
 
-      # ==================================================
-      # 6. Download ZAP
-      # ==================================================
+      - name: Download Vorpal results
+        uses: actions/download-artifact@v4
+        with:
+          name: vorpal-results
+          path: results/vorpal
+        continue-on-error: true
 
       - name: Download ZAP results
         uses: actions/download-artifact@v4
@@ -77,41 +544,39 @@ jobs:
         continue-on-error: true
 
 
-      # ==================================================
-      # 7. Show downloaded files
-      # ==================================================
+      # ========================================================
+      # Show downloaded files
+      # ========================================================
 
-      - name: Show downloaded results
+      - name: Show all scanner results
         run: |
-          echo "======================================"
-          echo "DOWNLOADED SECURITY RESULTS"
-          echo "======================================"
+
+          echo "=========================================="
+          echo "SCANNER RESULTS"
+          echo "=========================================="
 
           find results -type f -print || true
 
           echo ""
-          echo "======================================"
+          echo "=========================================="
           echo "SARIF FILES"
-          echo "======================================"
+          echo "=========================================="
 
-          find results -type f -name "*.sarif" -print || true
+          find results \
+            -type f \
+            -name "*.sarif" \
+            -print || true
 
 
-      # ==================================================
-      # 8. Generate consolidated report
-      # ==================================================
+      # ========================================================
+      # Generate consolidated report
+      # ========================================================
 
       - name: Generate consolidated report
         shell: bash
         run: |
 
-          set +e
-
           REPORT="security-summary.md"
-
-          # ------------------------------------------------
-          # Header
-          # ------------------------------------------------
 
           echo "# Consolidated Security Report" > "$REPORT"
           echo "" >> "$REPORT"
@@ -123,111 +588,91 @@ jobs:
 
           echo "" >> "$REPORT"
 
-          # ------------------------------------------------
-          # Scanner coverage
-          # ------------------------------------------------
+          # ====================================================
+          # Scanner Coverage
+          # ====================================================
 
           echo "## Scanner Coverage" >> "$REPORT"
           echo "" >> "$REPORT"
 
-          echo "| Scanner | Security Area | Status |" >> "$REPORT"
-          echo "|---|---|---|" >> "$REPORT"
+          echo "| Scanner | Security Area | SARIF |" >> "$REPORT"
+          echo "|---|---|---:|" >> "$REPORT"
 
 
-          # Vorpal
+          for SCANNER in vorpal 2ms kics zap; do
 
-          if find results/vorpal -type f -name "*.sarif" | grep -q .; then
-            echo "| Vorpal | SAST / Source Code | Available |" >> "$REPORT"
-          else
-            echo "| Vorpal | SAST / Source Code | No SARIF result |" >> "$REPORT"
-          fi
+              if find "results/$SCANNER" \
+                  -type f \
+                  -name "*.sarif" \
+                  2>/dev/null | grep -q .; then
 
+                  echo "| $SCANNER | Security scanning | Available |" \
+                    >> "$REPORT"
 
-          # 2MS
+              else
 
-          if find results/2ms -type f -name "*.sarif" | grep -q .; then
-            echo "| 2MS | Secret Scanning | Available |" >> "$REPORT"
-          else
-            echo "| 2MS | Secret Scanning | No SARIF result |" >> "$REPORT"
-          fi
+                  echo "| $SCANNER | Security scanning | Not available |" \
+                    >> "$REPORT"
 
+              fi
 
-          # KICS
-
-          if find results/kics -type f -name "*.sarif" | grep -q .; then
-            echo "| KICS | Infrastructure as Code | Available |" >> "$REPORT"
-          else
-            echo "| KICS | Infrastructure as Code | No SARIF result |" >> "$REPORT"
-          fi
-
-
-          # ZAP
-
-          if find results/zap -type f -name "*.sarif" | grep -q .; then
-            echo "| ZAP | DAST / Running Application | Available |" >> "$REPORT"
-          else
-            echo "| ZAP | DAST / Running Application | No SARIF result |" >> "$REPORT"
-          fi
+          done
 
 
           echo "" >> "$REPORT"
 
 
-          # ==================================================
-          # Findings Summary
-          # ==================================================
+          # ====================================================
+          # Count findings
+          # ====================================================
+
+          count_findings() {
+
+              DIRECTORY="$1"
+
+              TOTAL=0
+
+              while IFS= read -r -d '' FILE; do
+
+                  COUNT=$(jq '
+                      [.runs[]?.results[]?] | length
+                  ' "$FILE" 2>/dev/null)
+
+                  if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+                      TOTAL=$((TOTAL + COUNT))
+                  fi
+
+              done < <(
+                  find "$DIRECTORY" \
+                    -type f \
+                    -name "*.sarif" \
+                    -print0 2>/dev/null
+              )
+
+              echo "$TOTAL"
+          }
+
+
+          VORPAL_COUNT=$(count_findings results/vorpal)
+          TWO_MS_COUNT=$(count_findings results/2ms)
+          KICS_COUNT=$(count_findings results/kics)
+          ZAP_COUNT=$(count_findings results/zap)
+
+          TOTAL=$(
+              (
+                  VORPAL_COUNT +
+                  TWO_MS_COUNT +
+                  KICS_COUNT +
+                  ZAP_COUNT
+              )
+          )
+
 
           echo "## Findings Summary" >> "$REPORT"
           echo "" >> "$REPORT"
 
           echo "| Scanner | Findings |" >> "$REPORT"
           echo "|---|---:|" >> "$REPORT"
-
-
-          count_sarif() {
-
-            DIRECTORY="$1"
-
-            TOTAL=0
-
-            while IFS= read -r -d '' FILE; do
-
-              COUNT=$(jq -r '
-                [
-                  .runs[]?.results[]?
-                ] | length
-              ' "$FILE" 2>/dev/null)
-
-              if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
-                TOTAL=$((TOTAL + COUNT))
-              fi
-
-            done < <(
-              find "$DIRECTORY" \
-                -type f \
-                -name "*.sarif" \
-                -print0 2>/dev/null
-            )
-
-            echo "$TOTAL"
-          }
-
-
-          VORPAL_COUNT=$(count_sarif results/vorpal)
-          TWO_MS_COUNT=$(count_sarif results/2ms)
-          KICS_COUNT=$(count_sarif results/kics)
-          ZAP_COUNT=$(count_sarif results/zap)
-
-
-          TOTAL=$(
-            (
-              VORPAL_COUNT +
-              TWO_MS_COUNT +
-              KICS_COUNT +
-              ZAP_COUNT
-            )
-          )
-
 
           echo "| Vorpal | $VORPAL_COUNT |" >> "$REPORT"
           echo "| 2MS | $TWO_MS_COUNT |" >> "$REPORT"
@@ -238,9 +683,9 @@ jobs:
           echo "" >> "$REPORT"
 
 
-          # ==================================================
-          # Severity Summary
-          # ==================================================
+          # ====================================================
+          # Severity
+          # ====================================================
 
           echo "## Severity Summary" >> "$REPORT"
           echo "" >> "$REPORT"
@@ -249,36 +694,35 @@ jobs:
           echo "|---|---:|" >> "$REPORT"
 
 
-          for SEVERITY in critical high medium low; do
+          for SEVERITY in error warning note; do
 
-            COUNT=0
+              COUNT=0
 
-            while IFS= read -r -d '' FILE; do
+              while IFS= read -r -d '' FILE; do
 
-              CURRENT=$(jq -r --arg severity "$SEVERITY" '
-                [
-                  .runs[]?.results[]?
-                  |
-                  .level?
-                  |
-                  ascii_downcase
-                  |
-                  select(. == $severity)
-                ] | length
-              ' "$FILE" 2>/dev/null)
+                  CURRENT=$(jq \
+                    --arg severity "$SEVERITY" \
+                    '
+                    [
+                      .runs[]?.results[]?
+                      | .level?
+                      | ascii_downcase
+                      | select(. == $severity)
+                    ] | length
+                    ' "$FILE" 2>/dev/null)
 
-              if [[ "$CURRENT" =~ ^[0-9]+$ ]]; then
-                COUNT=$((COUNT + CURRENT))
-              fi
+                  if [[ "$CURRENT" =~ ^[0-9]+$ ]]; then
+                      COUNT=$((COUNT + CURRENT))
+                  fi
 
-            done < <(
-              find results \
-                -type f \
-                -name "*.sarif" \
-                -print0 2>/dev/null
-            )
+              done < <(
+                  find results \
+                    -type f \
+                    -name "*.sarif" \
+                    -print0 2>/dev/null
+              )
 
-            echo "| ${SEVERITY^} | $COUNT |" >> "$REPORT"
+              echo "| $SEVERITY | $COUNT |" >> "$REPORT"
 
           done
 
@@ -286,9 +730,9 @@ jobs:
           echo "" >> "$REPORT"
 
 
-          # ==================================================
-          # Individual Findings
-          # ==================================================
+          # ====================================================
+          # Individual findings
+          # ====================================================
 
           echo "## Individual Findings" >> "$REPORT"
           echo "" >> "$REPORT"
@@ -296,61 +740,62 @@ jobs:
 
           for SCANNER in vorpal 2ms kics zap; do
 
-            echo "### ${SCANNER^^}" >> "$REPORT"
-            echo "" >> "$REPORT"
+              echo "### ${SCANNER^^}" >> "$REPORT"
+              echo "" >> "$REPORT"
 
-            FOUND=false
+              FOUND=false
 
-            while IFS= read -r -d '' FILE; do
+              while IFS= read -r -d '' FILE; do
 
-              FOUND=true
+                  FOUND=true
 
-              jq -r '
-                .runs[]?.results[]?
-                |
-                "- **" +
-                (
-                  .ruleId //
-                  .message.text //
-                  "Unknown finding"
-                ) +
-                "** — Severity: " +
-                (
-                  .level //
-                  "unknown"
-                ) +
-                " — " +
-                (
-                  .message.text //
-                  "No description"
-                )
-              ' "$FILE" >> "$REPORT" 2>/dev/null || true
+                  jq -r '
+                    .runs[]?.results[]?
+                    |
+                    "- **" +
+                    (
+                      .ruleId //
+                      "Unknown rule"
+                    ) +
+                    "** — " +
+                    (
+                      .level //
+                      "unknown"
+                    ) +
+                    " — " +
+                    (
+                      .message.text //
+                      "No description"
+                    )
+                  ' "$FILE" >> "$REPORT" 2>/dev/null || true
 
-            done < <(
-              find "results/$SCANNER" \
-                -type f \
-                -name "*.sarif" \
-                -print0 2>/dev/null
-            )
+              done < <(
+                  find "results/$SCANNER" \
+                    -type f \
+                    -name "*.sarif" \
+                    -print0 2>/dev/null
+              )
 
 
-            if [ "$FOUND" = false ]; then
-              echo "_No SARIF findings available._" >> "$REPORT"
-            fi
+              if [ "$FOUND" = false ]; then
 
-            echo "" >> "$REPORT"
+                  echo "_No SARIF results available._" >> "$REPORT"
+
+              fi
+
+              echo "" >> "$REPORT"
 
           done
 
 
-          # ==================================================
+          # ====================================================
           # Conclusion
-          # ==================================================
+          # ====================================================
 
           echo "## Conclusion" >> "$REPORT"
           echo "" >> "$REPORT"
 
-          echo "This report consolidates security findings from:" >> "$REPORT"
+          echo "The report aggregates results from:" >> "$REPORT"
           echo "" >> "$REPORT"
 
           echo "- Vorpal — SAST / Source Code" >> "$REPORT"
@@ -360,37 +805,36 @@ jobs:
 
           echo "" >> "$REPORT"
 
-          echo "> This report aggregates scanner outputs into a single view. It does not perform vulnerability correlation or deduplication." >> "$REPORT"
+          echo "> This is an aggregation of scanner results. It does not perform cross-tool vulnerability correlation or deduplication." >> "$REPORT"
 
 
-          # ==================================================
-          # Verify report
-          # ==================================================
+      # ========================================================
+      # Display report
+      # ========================================================
 
-          echo ""
-          echo "======================================"
-          echo "CONSOLIDATED REPORT"
-          echo "======================================"
+      - name: Display consolidated report
+        if: always()
+        run: |
 
-          if [ -f "$REPORT" ]; then
+          echo "=========================================="
+          echo "CONSOLIDATED SECURITY REPORT"
+          echo "=========================================="
 
-            echo "SUCCESS: $REPORT created."
+          if [ -f security-summary.md ]; then
 
-            ls -lh "$REPORT"
-
-            echo ""
-            cat "$REPORT"
+              cat security-summary.md
 
           else
 
-            echo "ERROR: Report was not created."
+              echo "ERROR: security-summary.md was not generated."
+              exit 1
 
           fi
 
 
-      # ==================================================
-      # 9. Upload consolidated report
-      # ==================================================
+      # ========================================================
+      # Upload final report
+      # ========================================================
 
       - name: Upload consolidated report
         if: always()
