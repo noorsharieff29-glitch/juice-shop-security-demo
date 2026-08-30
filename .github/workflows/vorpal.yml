@@ -1,7 +1,6 @@
-
 name: Vorpal Code Scan
 
-on: [push,pull_request]
+on: [push, pull_request]
 
 permissions:
   contents: read
@@ -14,10 +13,11 @@ jobs:
 
     steps:
 
+      # 1. Checkout code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Get all JavaScript files in NodeGoat
+      # 2. Get all JavaScript files
       - name: Get JavaScript files
         id: js-files
         run: |
@@ -33,7 +33,7 @@ jobs:
 
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
 
-      # Run official Checkmarx Vorpal action
+      # 3. Run Vorpal
       - name: Run Vorpal
         if: steps.js-files.outputs.files != ''
         uses: checkmarx/vorpal-reviewdog-github-action@v1.0.0
@@ -45,12 +45,16 @@ jobs:
           level: info
           fail_on_error: false
 
-      # Create readable report from Vorpal's ACTUAL output
-      - name: Create Vorpal report
+      # 4. Create reports directory
+      - name: Create reports directory
         if: always()
         run: |
-
           mkdir -p reports
+
+      # 5. Create readable Vorpal report
+      - name: Create Vorpal text report
+        if: always()
+        run: |
 
           echo "==================================================" > reports/vorpal-security-report.txt
           echo "             VORPAL SECURITY REPORT" >> reports/vorpal-security-report.txt
@@ -63,11 +67,10 @@ jobs:
           echo "" >> reports/vorpal-security-report.txt
 
           echo "==================================================" >> reports/vorpal-security-report.txt
-          echo "             VORPAL FINDINGS" >> reports/vorpal-security-report.txt
+          echo "                 VORPAL FINDINGS" >> reports/vorpal-security-report.txt
           echo "==================================================" >> reports/vorpal-security-report.txt
           echo "" >> reports/vorpal-security-report.txt
 
-          # The Checkmarx action creates this file
           if [ -f all_results.errorformat ]; then
 
             echo "Raw Vorpal findings:" >> reports/vorpal-security-report.txt
@@ -77,18 +80,20 @@ jobs:
 
           else
 
-            echo "No Vorpal findings were generated." >> reports/vorpal-security-report.txt
+            echo "No Vorpal findings were generated." \
+              >> reports/vorpal-security-report.txt
 
           fi
 
           echo "" >> reports/vorpal-security-report.txt
-          echo "==================================================" >> reports/vorpal-security-report.txt
+          echo "==================================================" \
+            >> reports/vorpal-security-report.txt
 
           echo ""
           echo "========== VORPAL REPORT =========="
           cat reports/vorpal-security-report.txt
 
-      # Keep the raw Vorpal file too
+      # 6. Keep raw Vorpal output
       - name: Copy raw Vorpal results
         if: always()
         run: |
@@ -100,12 +105,113 @@ jobs:
               > reports/vorpal-raw-results.txt
           fi
 
-      # Upload both readable and raw results
-      - name: Upload Vorpal reports
+      # 7. Create SARIF file
+      - name: Create Vorpal SARIF
+        if: always()
+        shell: bash
+        run: |
+
+          python3 <<'PY'
+          import json
+          import os
+          import re
+
+          input_file = "all_results.errorformat"
+          output_file = "reports/vorpal.sarif"
+
+          results = []
+
+          if os.path.exists(input_file):
+
+              with open(input_file, "r", errors="replace") as f:
+                  lines = f.readlines()
+
+              for line in lines:
+
+                  line = line.strip()
+
+                  if not line:
+                      continue
+
+                  # Expected errorformat is generally:
+                  # file:line:column: message
+
+                  match = re.match(
+                      r"^(.*?):(\d+):(\d+):\s*(.*)$",
+                      line
+                  )
+
+                  if match:
+
+                      file_path = match.group(1)
+                      line_number = int(match.group(2))
+                      column_number = int(match.group(3))
+                      message = match.group(4)
+
+                      results.append({
+                          "ruleId": "vorpal-finding",
+                          "level": "warning",
+                          "message": {
+                              "text": message
+                          },
+                          "locations": [
+                              {
+                                  "physicalLocation": {
+                                      "artifactLocation": {
+                                          "uri": file_path
+                                      },
+                                      "region": {
+                                          "startLine": line_number,
+                                          "startColumn": column_number
+                                      }
+                                  }
+                              }
+                          ]
+                      })
+
+          sarif = {
+              "$schema":
+                  "https://json.schemastore.org/sarif-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [
+                  {
+                      "tool": {
+                          "driver": {
+                              "name": "Checkmarx Vorpal"
+                          }
+                      },
+                      "results": results
+                  }
+              ]
+          }
+
+          with open(output_file, "w") as f:
+              json.dump(sarif, f, indent=2)
+
+          print(f"Created {output_file}")
+          print(f"Findings converted to SARIF: {len(results)}")
+          PY
+
+      # 8. Validate/show SARIF
+      - name: Check Vorpal SARIF
+        if: always()
+        run: |
+
+          echo "======================================"
+          echo "VORPAL SARIF"
+          echo "======================================"
+
+          ls -lah reports/
+
+          echo ""
+          cat reports/vorpal.sarif
+
+      # 9. Upload all Vorpal results
+      - name: Upload Vorpal results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vorpal-security-report
+          name: vorpal-results
           path: reports/
           if-no-files-found: error
           retention-days: 30

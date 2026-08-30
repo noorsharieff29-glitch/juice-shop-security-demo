@@ -31,7 +31,7 @@ jobs:
       - name: Download KICS results
         uses: actions/download-artifact@v4
         with:
-          name: kics-results
+          name: kics-report
           path: results/kics
         continue-on-error: true
 
