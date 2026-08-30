@@ -1,0 +1,243 @@
+name: Consolidated Security Summary
+
+on: [workflow_dispatch]
+
+jobs:
+  security-summary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------
+      # Download scanner artifacts
+      # ---------------------------------------------------
+
+      - name: Download Vorpal results
+        uses: actions/download-artifact@v4
+        with:
+          name: vorpal-results
+          path: results/vorpal
+        continue-on-error: true
+
+      - name: Download 2MS results
+        uses: actions/download-artifact@v4
+        with:
+          name: 2ms-results
+          path: results/2ms
+        continue-on-error: true
+
+      - name: Download KICS results
+        uses: actions/download-artifact@v4
+        with:
+          name: kics-results
+          path: results/kics
+        continue-on-error: true
+
+      - name: Download ZAP results
+        uses: actions/download-artifact@v4
+        with:
+          name: zap-results
+          path: results/zap
+        continue-on-error: true
+
+      # ---------------------------------------------------
+      # Display what was downloaded
+      # ---------------------------------------------------
+
+      - name: List security results
+        run: |
+          echo "====================================="
+          echo "Downloaded Security Scan Results"
+          echo "====================================="
+          find results -type f || true
+
+      # ---------------------------------------------------
+      # Generate consolidated report
+      # ---------------------------------------------------
+
+      - name: Generate consolidated report
+        shell: bash
+        run: |
+
+          REPORT="security-summary.md"
+
+          echo "# Consolidated Security Report" > "$REPORT"
+          echo "" >> "$REPORT"
+          echo "**Repository:** $GITHUB_REPOSITORY" >> "$REPORT"
+          echo "**Commit:** $GITHUB_SHA" >> "$REPORT"
+          echo "**Generated:** $(date -u)" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          echo "## Scanner Coverage" >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "| Scanner | Security Area | Result |" >> "$REPORT"
+          echo "|---|---|---|" >> "$REPORT"
+
+          if find results/vorpal -type f 2>/dev/null | grep -q .; then
+            echo "| Vorpal | SAST / Source Code | Available |" >> "$REPORT"
+          else
+            echo "| Vorpal | SAST / Source Code | No result |" >> "$REPORT"
+          fi
+
+          if find results/2ms -type f 2>/dev/null | grep -q .; then
+            echo "| 2MS | Secrets | Available |" >> "$REPORT"
+          else
+            echo "| 2MS | Secrets | No result |" >> "$REPORT"
+          fi
+
+          if find results/kics -type f 2>/dev/null | grep -q .; then
+            echo "| KICS | Infrastructure as Code | Available |" >> "$REPORT"
+          else
+            echo "| KICS | Infrastructure as Code | No result |" >> "$REPORT"
+          fi
+
+          if find results/zap -type f 2>/dev/null | grep -q .; then
+            echo "| ZAP | DAST / Running Application | Available |" >> "$REPORT"
+          else
+            echo "| ZAP | DAST / Running Application | No result |" >> "$REPORT"
+          fi
+
+          echo "" >> "$REPORT"
+
+          # ------------------------------------------------
+          # Count SARIF findings
+          # ------------------------------------------------
+
+          echo "## Findings Summary" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          echo "| Scanner | Findings |" >> "$REPORT"
+          echo "|---|---:|" >> "$REPORT"
+
+          count_sarif() {
+            directory="$1"
+
+            if [ -d "$directory" ]; then
+              find "$directory" -name "*.sarif" -print0 2>/dev/null |
+              xargs -0 -r jq -r '
+                [.runs[]?.results[]?] | length
+              ' 2>/dev/null |
+              awk '{sum += $1} END {print sum+0}'
+            else
+              echo "0"
+            fi
+          }
+
+          VORPAL_COUNT=$(count_sarif results/vorpal)
+          TWO_MS_COUNT=$(count_sarif results/2ms)
+          KICS_COUNT=$(count_sarif results/kics)
+          ZAP_COUNT=$(count_sarif results/zap)
+
+          TOTAL=$((VORPAL_COUNT + TWO_MS_COUNT + KICS_COUNT + ZAP_COUNT))
+
+          echo "| Vorpal | $VORPAL_COUNT |" >> "$REPORT"
+          echo "| 2MS | $TWO_MS_COUNT |" >> "$REPORT"
+          echo "| KICS | $KICS_COUNT |" >> "$REPORT"
+          echo "| ZAP | $ZAP_COUNT |" >> "$REPORT"
+          echo "| **Total** | **$TOTAL** |" >> "$REPORT"
+
+          echo "" >> "$REPORT"
+
+          # ------------------------------------------------
+          # Severity summary
+          # ------------------------------------------------
+
+          echo "## Severity Summary" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          echo "| Severity | Findings |" >> "$REPORT"
+          echo "|---|---:|" >> "$REPORT"
+
+          for severity in critical high medium low; do
+
+            COUNT=0
+
+            for file in $(find results -name "*.sarif" 2>/dev/null); do
+
+              CURRENT=$(jq -r --arg severity "$severity" '
+                [
+                  .runs[]?.results[]?
+                  | .level?
+                  | ascii_downcase
+                  | select(. == $severity)
+                ] | length
+              ' "$file" 2>/dev/null || echo 0)
+
+              COUNT=$((COUNT + CURRENT))
+
+            done
+
+            echo "| ${severity^} | $COUNT |" >> "$REPORT"
+
+          done
+
+          echo "" >> "$REPORT"
+
+          # ------------------------------------------------
+          # Individual scanner details
+          # ------------------------------------------------
+
+          echo "## Scanner Details" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          for scanner in vorpal 2ms kics zap; do
+
+            echo "### ${scanner^^}" >> "$REPORT"
+            echo "" >> "$REPORT"
+
+            FOUND=false
+
+            for file in $(find "results/$scanner" -name "*.sarif" 2>/dev/null); do
+
+              FOUND=true
+
+              jq -r '
+                .runs[]?.results[]? |
+                "- **" +
+                (
+                  .ruleId //
+                  .message.text //
+                  "Unknown finding"
+                ) +
+                "** — " +
+                (
+                  .level //
+                  "unknown severity"
+                )
+              ' "$file" >> "$REPORT" 2>/dev/null || true
+
+            done
+
+            if [ "$FOUND" = false ]; then
+              echo "_No SARIF results found._" >> "$REPORT"
+            fi
+
+            echo "" >> "$REPORT"
+
+          done
+
+          echo "## Conclusion" >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "This report consolidates findings from Vorpal, 2MS, KICS and ZAP." >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "> Note: Consolidation does not necessarily mean that findings have been correlated or deduplicated. The report aggregates scanner outputs into a single view." >> "$REPORT"
+
+          echo ""
+          echo "====================================="
+          echo "Consolidated report generated:"
+          echo "$REPORT"
+          echo "====================================="
+
+          cat "$REPORT"
+
+      # ---------------------------------------------------
+      # Upload consolidated report
+      # ---------------------------------------------------
+
+      - name: Upload consolidated report
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolidated-security-report
+          path: security-summary.md
