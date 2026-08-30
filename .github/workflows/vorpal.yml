@@ -1,0 +1,111 @@
+
+name: Vorpal Code Scan
+
+on: [push,pull_request]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  vorpal:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Get all JavaScript files in NodeGoat
+      - name: Get JavaScript files
+        id: js-files
+        run: |
+          FILES=$(find . \
+            -type f \
+            \( -name "*.js" -o -name "*.jsx" \) \
+            ! -path "./.git/*" \
+            ! -path "./node_modules/*" \
+            | paste -sd "," -)
+
+          echo "JavaScript files to scan:"
+          echo "$FILES"
+
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+      # Run official Checkmarx Vorpal action
+      - name: Run Vorpal
+        if: steps.js-files.outputs.files != ''
+        uses: checkmarx/vorpal-reviewdog-github-action@v1.0.0
+        with:
+          source_path: "${{ steps.js-files.outputs.files }}"
+          filter_mode: nofilter
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-check
+          level: info
+          fail_on_error: false
+
+      # Create readable report from Vorpal's ACTUAL output
+      - name: Create Vorpal report
+        if: always()
+        run: |
+
+          mkdir -p reports
+
+          echo "==================================================" > reports/vorpal-security-report.txt
+          echo "             VORPAL SECURITY REPORT" >> reports/vorpal-security-report.txt
+          echo "==================================================" >> reports/vorpal-security-report.txt
+          echo "" >> reports/vorpal-security-report.txt
+
+          echo "Repository : ${{ github.repository }}" >> reports/vorpal-security-report.txt
+          echo "Branch     : ${{ github.ref_name }}" >> reports/vorpal-security-report.txt
+          echo "Commit     : ${{ github.sha }}" >> reports/vorpal-security-report.txt
+          echo "" >> reports/vorpal-security-report.txt
+
+          echo "==================================================" >> reports/vorpal-security-report.txt
+          echo "             VORPAL FINDINGS" >> reports/vorpal-security-report.txt
+          echo "==================================================" >> reports/vorpal-security-report.txt
+          echo "" >> reports/vorpal-security-report.txt
+
+          # The Checkmarx action creates this file
+          if [ -f all_results.errorformat ]; then
+
+            echo "Raw Vorpal findings:" >> reports/vorpal-security-report.txt
+            echo "" >> reports/vorpal-security-report.txt
+
+            cat all_results.errorformat >> reports/vorpal-security-report.txt
+
+          else
+
+            echo "No Vorpal findings were generated." >> reports/vorpal-security-report.txt
+
+          fi
+
+          echo "" >> reports/vorpal-security-report.txt
+          echo "==================================================" >> reports/vorpal-security-report.txt
+
+          echo ""
+          echo "========== VORPAL REPORT =========="
+          cat reports/vorpal-security-report.txt
+
+      # Keep the raw Vorpal file too
+      - name: Copy raw Vorpal results
+        if: always()
+        run: |
+
+          if [ -f all_results.errorformat ]; then
+            cp all_results.errorformat reports/vorpal-raw-results.txt
+          else
+            echo "No raw Vorpal results file was created." \
+              > reports/vorpal-raw-results.txt
+          fi
+
+      # Upload both readable and raw results
+      - name: Upload Vorpal reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vorpal-security-report
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30

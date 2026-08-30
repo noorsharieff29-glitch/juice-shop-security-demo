@@ -1,0 +1,66 @@
+# KICS IaC Scan — PDF Artifact
+
+name: KICS IaC Scan
+
+on: [push,pull_request]
+
+jobs:
+  kics:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create KICS reports directory
+        run: |
+          mkdir -p kics-results
+
+      - name: Run KICS scan
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/path" \
+            checkmarx/kics:latest \
+            scan \
+            -p /path \
+            -o /path/kics-results \
+            --report-formats "json,sarif,html,pdf" \
+            --output-name kics-report
+
+      - name: Show KICS reports
+        if: always()
+        run: |
+          echo "======================================"
+          echo "KICS REPORTS"
+          echo "======================================"
+
+          find kics-results -type f -maxdepth 2 -print
+
+          echo ""
+          echo "======================================"
+          echo "PDF FILES"
+          echo "======================================"
+
+          find kics-results -type f -name "*.pdf" -exec ls -lh {} \;
+
+      - name: Verify PDF
+        if: always()
+        run: |
+          if [ -f "kics-results/kics-report.pdf" ]; then
+            echo "SUCCESS: KICS PDF generated."
+            ls -lh kics-results/kics-report.pdf
+          else
+            echo "ERROR: KICS PDF was not generated."
+            echo "Files found:"
+            find kics-results -type f
+            exit 1
+          fi
+
+      - name: Upload KICS PDF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kics-pdf-report
+          path: kics-results/kics-report.pdf
+          retention-days: 30
