@@ -1,27 +1,31 @@
-# KICS IaC Scan — PDF Artifact
-
 name: KICS IaC Scan
 
-on: [push,pull_request]
+on:
+  push:
+    branches:
+      - master
+      - security-demo
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
 
 jobs:
   kics:
     runs-on: ubuntu-latest
 
     steps:
-     - name: Download KICS results
-  uses: actions/download-artifact@v4
-  with:
-    name: kics-results
-    path: results/kics
 
+      # 1. Checkout repository
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create KICS reports directory
+      # 2. Create results directory
+      - name: Create KICS results directory
         run: |
           mkdir -p kics-results
 
+      # 3. Run KICS
       - name: Run KICS scan
         run: |
           docker run --rm \
@@ -30,44 +34,49 @@ jobs:
             scan \
             -p /path \
             -o /path/kics-results \
-            --report-formats "json,sarif,html,pdf" \
+            --report-formats "json,sarif" \
             --output-name kics-report
 
-      - name: Show KICS reports
+      # 4. Show generated files
+      - name: Show KICS results
         if: always()
         run: |
           echo "======================================"
-          echo "KICS REPORTS"
+          echo "KICS RESULTS"
           echo "======================================"
 
-          find kics-results -type f -maxdepth 2 -print
+          find kics-results -type f -print
 
           echo ""
           echo "======================================"
-          echo "PDF FILES"
+          echo "SARIF FILES"
           echo "======================================"
 
-          find kics-results -type f -name "*.pdf" -exec ls -lh {} \;
+          find kics-results -type f -name "*.sarif" -exec ls -lh {} \;
 
-      - name: Verify PDF
+      # 5. Verify SARIF
+      - name: Verify KICS SARIF
         if: always()
         run: |
-          if [ -f "kics-results/kics-report.pdf" ]; then
-            echo "SUCCESS: KICS PDF generated."
-            ls -lh kics-results/kics-report.pdf
+          SARIF_FILE=$(find kics-results -type f -name "*.sarif" | head -1)
+
+          if [ -n "$SARIF_FILE" ]; then
+            echo "SUCCESS: KICS SARIF generated:"
+            echo "$SARIF_FILE"
+            ls -lh "$SARIF_FILE"
           else
-            echo "ERROR: KICS PDF was not generated."
+            echo "ERROR: KICS SARIF was not generated."
             echo "Files found:"
             find kics-results -type f
             exit 1
           fi
 
-      - name: Upload KICS PDF
+      # 6. Upload KICS results
+      - name: Upload KICS results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kics-pdf-report
-          path: kics-results/kics-report.pdf
+          name: kics-results
+          path: kics-results/
+          if-no-files-found: error
           retention-days: 30
-          
-          
