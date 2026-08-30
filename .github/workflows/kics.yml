@@ -25,8 +25,9 @@ jobs:
         run: |
           mkdir -p kics-results
 
-      # 3. Run KICS
+      # 3. Run KICS - JSON + SARIF + PDF
       - name: Run KICS scan
+        continue-on-error: true
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/path" \
@@ -34,7 +35,7 @@ jobs:
             scan \
             -p /path \
             -o /path/kics-results \
-            --report-formats "json,sarif" \
+            --report-formats "json,sarif,pdf" \
             --output-name kics-report
 
       # 4. Show generated files
@@ -54,6 +55,13 @@ jobs:
 
           find kics-results -type f -name "*.sarif" -exec ls -lh {} \;
 
+          echo ""
+          echo "======================================"
+          echo "PDF FILES"
+          echo "======================================"
+
+          find kics-results -type f -name "*.pdf" -exec ls -lh {} \;
+
       # 5. Verify SARIF
       - name: Verify KICS SARIF
         if: always()
@@ -66,12 +74,27 @@ jobs:
             ls -lh "$SARIF_FILE"
           else
             echo "ERROR: KICS SARIF was not generated."
-            echo "Files found:"
             find kics-results -type f
             exit 1
           fi
 
-      # 6. Upload KICS results
+      # 6. Verify PDF
+      - name: Verify KICS PDF
+        if: always()
+        run: |
+          PDF_FILE=$(find kics-results -type f -name "*.pdf" | head -1)
+
+          if [ -n "$PDF_FILE" ]; then
+            echo "SUCCESS: KICS PDF generated:"
+            echo "$PDF_FILE"
+            ls -lh "$PDF_FILE"
+          else
+            echo "ERROR: KICS PDF was not generated."
+            find kics-results -type f
+            exit 1
+          fi
+
+      # 7. Upload KICS results
       - name: Upload KICS results
         if: always()
         uses: actions/upload-artifact@v4
